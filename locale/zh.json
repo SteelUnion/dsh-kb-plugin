@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH-КБ-plugin · 插件设计局",
+    "description": "把 DSH 的 cordis 服务画成三维分子构型，点服务拼成插件链，导出插件方案。"
+  }
+}

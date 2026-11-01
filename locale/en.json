@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH-КБ-plugin · Plugin Bureau",
+    "description": "Renders the cordis service graph as a 3D molecule, lets you chain services into a plugin plan, and exports the plan."
+  }
+}

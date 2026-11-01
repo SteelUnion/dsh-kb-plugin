@@ -1,0 +1,4 @@
+- insert:
+    - id: kb-plugin-bureau
+      name: 'dsh-kb-plugin'
+      config: {}

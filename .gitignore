@@ -1,0 +1,15 @@
+# 构建输入：模板与内联数据
+client.tpl.js
+*.tpl.js
+
+# 备份
+*.bak
+*.bak-*
+*.BROKEN-*
+
+# 依赖
+node_modules/
+
+# 系统
+.DS_Store
+Thumbs.db
