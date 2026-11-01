@@ -961,7 +961,7 @@ window.__ModuleLoader__.load({
             .slice(0, LIMIT);
           for (const d of outs) {
             drawOne(selected, d.to,
-              d.c === 'direct' ? 'rgba(96,196,214,0.60)' : 'rgba(96,196,214,0.18)', 1.4);
+              d.c === 'direct' ? 'rgba(96,196,214,0.70)' : 'rgba(96,196,214,0.35)', 1.8);
           }
 
           const ins = (rec0.by ?? [])
@@ -970,7 +970,7 @@ window.__ModuleLoader__.load({
             .slice(0, LIMIT);
           for (const d of ins) {
             drawOne(d.from, selected,
-              d.c === 'direct' ? 'rgba(230,150,80,0.55)' : 'rgba(230,150,80,0.16)', 1.4);
+              d.c === 'direct' ? 'rgba(230,150,80,0.65)' : 'rgba(230,150,80,0.32)', 1.8);
           }
 
           // 端点小圆

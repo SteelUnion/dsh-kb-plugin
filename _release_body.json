@@ -1,0 +1,8 @@
+{
+  "tag_name": "v0.0.1",
+  "target_commitish": "main",
+  "name": "v0.0.1 — 3D Cordis service graph",
+  "body": "## DSH-КБ-plugin · 插件设计局 v0.0.1\n\n把 DeepSeek Harness 的 cordis 服务图画成三维分子，并在图边上设计插件链。\n\n### 已实现\n\n**三维服务图**\n- 14 个球（host 5 层 / client 9 层），125 个服务，59 组层间依赖\n- 真透视（焦距 900）、曲线键（跨面琥珀 / 同面石板灰）\n- 三级聚焦：全景 → 点球聚焦 → 点服务点选中，700ms 平滑过渡\n- 左下角 14 个球的快捷跳转 + 重置视角\n\n**选中服务**\n- 右侧方法清单（签名 + 白话）\n- 依赖 / 被依赖分组，带计数、筛选、chip 可点跳转\n- 依赖线：出边青色 / 入边橙色，带箭头，跨球绘制\n- 切到全景仍保留选中标记\n\n**搜索**\n- 服务名 / 中文说明，回车定位\n\n### 开发中\n\n- 插件链编辑器：`＋ 后续` / `＋ 前置` 暂不可用\n- 配置目前存浏览器本地，目录管理未做\n\n### 安装\n\n见 README。需手工改 profile 的 `package.json` 并 `pnpm install`，三处（`bundles` / `dependencies` / `node_modules`）必须同时对得上。",
+  "draft": false,
+  "prerelease": true
+}
