@@ -492,6 +492,12 @@ window.__ModuleLoader__.load({
 .kb-seg.on{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);
   border-color:var(--dsw-alias-border-l2)}
 .kb-panel{width:340px}
+/* ── 「当前服务」卡片：选中后一直挂在面板顶部 ── */
+.kb-cur{border:1px solid var(--dsw-alias-border-l1);border-radius:8px;
+  background:var(--dsw-alias-bg-layer-1);padding:9px 10px;margin-bottom:10px}
+.kb-curhd{display:flex;align-items:center;gap:6px;font-size:12.5px;line-height:1.4}
+.kb-curhd .sp{flex:1}
+.kb-curhd b{font-family:"Times New Roman","SimSun",serif;font-size:13px}
 `;
 
     // ══ 四元数 ═════════════════════════════════════════════
@@ -655,6 +661,28 @@ window.__ModuleLoader__.load({
         return Math.min(size.w / spanX, size.h / spanY) * (s ? 0.9 : 0.86);
       }, [size, focus]);
 
+      // ── 两个「换球」函数，必须分开（原型 scene.html:849-860 / 1748-1754）──
+      //
+      // focusSphere    用户自己点球 / 点 Dock / 点空白 → **清掉选中服务和搜索框**
+      // focusBallOnly  因为「选中了某个服务」而顺带把镜头挪过去 → **什么都不清**
+      //
+      // 我上一版把两者合成一个 setFocus，于是「选中服务」也被当成「用户换球」，
+      // 一选服务就把 selected 和搜索框一起清掉 —— 这就是「切回主画面，右侧变样了」。
+      const focusSphere = (id) => {
+        setFocus(id);
+        setSelected(null);
+        setQuery('');
+        camRef.current = { q: camRef.current.q, zoom: 1 };
+        flyTo(id);
+      };
+
+      const focusBallOnly = (id) => {
+        if (!id) return;
+        setFocus(id);
+        camRef.current = { q: camRef.current.q, zoom: 1 };
+        flyTo(id);
+      };
+
       /** 飞过去（原型 viewFor + tweenTo） */
       const flyTo = (ballId) => {
         const tw = twRef.current;
@@ -811,6 +839,17 @@ window.__ModuleLoader__.load({
         }
 
         // ── ② 球 + 球内服务点（原型 scene.html:526-588）────
+        // activeSvc = 主图选中的服务 **或** 链条里选中节点的服务（原型 1762 行）。
+        // 在这里就算出来，宏观的「选中点/名字/光晕」和依赖线都用同一个，不会两套。
+        const chainSvcId = (() => {
+          if (!chainSel) return null;
+          const nd = (plan.nodes ?? []).find((x) => x.id === chainSel);
+          return nd ? nd.svc : null;
+        })();
+        const activeSvc = (selected && IFACE[selected]) ? selected
+          : (chainSvcId && IFACE[chainSvcId]) ? chainSvcId
+            : null;
+
         // 降序：z 大的先画（远的先画，近的盖上去）
         const balls = [];
         const innerList = [];    // 聚焦球内的服务点，标签留到最后统一避让
@@ -876,7 +915,7 @@ window.__ModuleLoader__.load({
 
             for (const { n, np } of inner) {
               const near = np.z < c.z;
-              const hitSvc = selected === n.name;
+              const hitSvc = activeSvc === n.name;
               const hovSvc = hoverRef.current &&
                 hoverRef.current.sphere === s.id &&
                 hoverRef.current.node === n.name;
@@ -895,7 +934,7 @@ window.__ModuleLoader__.load({
           } else {
             // ── 宏观：先铺一层极淡的节点纹理（球自带，不选中也看得见）──
             const nodes = s.nodes ?? [];
-            const selNode = selected ? nodes.find((n) => n.name === selected) : null;
+            const selNode = activeSvc ? nodes.find((n) => n.name === activeSvc) : null;
             for (const n of nodes) {
               if (selNode && n === selNode) continue;   // 选中的留到后面画重的
               const np = project(n.pos);
@@ -925,7 +964,7 @@ window.__ModuleLoader__.load({
               g.stroke();
 
               // ③ 名字：服务名 · 球名（中英），让宏观自己说清「这是谁、在哪」
-              const lab = selected;
+              const lab = activeSvc;
               const sub = (s.nameEn || s.id) + (s.nameZh ? ' · ' + s.nameZh : '');
               g.font = `500 12px -apple-system,"Segoe UI",sans-serif`;
               g.textAlign = 'left';
@@ -961,10 +1000,41 @@ window.__ModuleLoader__.load({
           balls.push({ s, c, r, hex, isFocus });
         }
 
-        // ── ②b 依赖细线：出边青色 / 入边橙色（原型 scene.html:1808-1854）──
-        // 原型里 NODE_AT 是整个分子所有服务点的屏幕坐标（全局），
-        // 所以跨球的依赖能画成长线。这里照做：不限于当前聚焦的那个球。
-        if (selected && IFACE[selected]) {
+        // ── ②b 依赖细线：出边青色 / 入边橙色（原型 drawIfLinks，scene.html:1759-1854）──
+        //
+        // activeSvc = 选中的服务 **或** 链条里选中节点的服务（原型 1762 行）：
+        //     const activeSvc = STATE.selected || chainSvc;
+        // 两者是「或」关系，谁有值谁生效，**互不覆盖**。
+        // 这就是「搜索框选中和插件链选中不该互相干扰」。
+        // activeSvc 已在 ② 之前算好，这里直接用。
+
+        // 链条里选中、但和主图选中的不是同一个 → 给它一个虚线环 + 名字（原型 1766-1781），
+        // 否则「点了链条节点，左边没反应」的感觉会一直在。
+        if (chainSvcId && chainSvcId !== selected) {
+          const nodeAt0 = {};
+          for (const sp of SPHERES) for (const n of sp.nodes ?? []) nodeAt0[n.name] = project(n.pos);
+          const c0 = nodeAt0[chainSvcId];
+          if (c0) {
+            g.save();
+            g.setLineDash([4, 3]);
+            g.beginPath();
+            g.arc(c0.x, c0.y, 13, 0, Math.PI * 2);
+            g.strokeStyle = 'rgba(224,176,64,0.95)';
+            g.lineWidth = 1.8;
+            g.stroke();
+            g.restore();
+            g.textAlign = 'left';
+            g.textBaseline = 'middle';
+            g.font = `11px "Times New Roman","SimSun",serif`;
+            g.lineWidth = 3.5;
+            g.strokeStyle = 'rgba(9,11,14,0.92)';
+            g.strokeText(chainSvcId, c0.x + 16, c0.y);
+            g.fillStyle = 'rgba(255,212,121,0.98)';
+            g.fillText(chainSvcId, c0.x + 16, c0.y);
+          }
+        }
+
+        if (activeSvc) {
           const nodeAt = {};
           for (const sp of SPHERES) {
             for (const n of sp.nodes ?? []) nodeAt[n.name] = project(n.pos);
@@ -1023,14 +1093,14 @@ window.__ModuleLoader__.load({
           // 半透明白色叠加会让线偏灰，所以直接给足 alpha。
           const LIMIT = 12;   // 原型是 4；这里给多点，画布够大
           const rank = (x) => (x.c === 'direct' ? 0 : 1);
-          const rec0 = IFACE[selected];
+          const rec0 = IFACE[activeSvc];
 
           const outs = (rec0.deps ?? [])
             .filter((d) => nodeAt[d.to])
             .sort((a, b) => rank(a) - rank(b))
             .slice(0, LIMIT);
           for (const d of outs) {
-            drawOne(selected, d.to,
+            drawOne(activeSvc, d.to,
               d.c === 'direct' ? 'rgba(96,196,214,0.92)' : 'rgba(96,196,214,0.42)', 1.6);
           }
 
@@ -1039,7 +1109,7 @@ window.__ModuleLoader__.load({
             .sort((a, b) => rank(a) - rank(b))
             .slice(0, LIMIT);
           for (const d of ins) {
-            drawOne(d.from, selected,
+            drawOne(d.from, activeSvc,
               d.c === 'direct' ? 'rgba(230,150,80,0.88)' : 'rgba(230,150,80,0.40)', 1.6);
           }
 
@@ -1176,7 +1246,7 @@ window.__ModuleLoader__.load({
           }
         }
         }   // ← drawFrame 结束
-      }, [size, focus, selected, query, tick, center, zoomBase]);
+      }, [size, focus, selected, query, tick, center, zoomBase, chainSel, plan.nodes]);
 
       // ── 点击拾取：先球，再服务（要与绘制用同一套透视）──
       const hitTest = (mx, my) => {
@@ -1283,19 +1353,14 @@ window.__ModuleLoader__.load({
         const rect = e.currentTarget.getBoundingClientRect();
         const hit = hitTest(e.clientX - rect.left, e.clientY - rect.top);
         if (!hit) {
-          setFocus(null);
-          setSelected(null);
-          flyTo(null);
+          // 点空白 = 用户主动「什么都不看」→ 回全景并清选中（原型 scene.html:777）
+          focusSphere(null);
           return;
         }
         if (hit.svc) { setSelected(hit.svc); return; }
-        // 点同一个球 = 取消聚焦（照抄原型 scene.html:776）
-        // 注意：原型 focusSphere 不动 STATE.selected，这里也不动 ——
-        // 否则切个球就把「选中的服务」丢了，依赖线和加节点按钮一起失效。
+        // 点球 = 用户主动换聚焦 → focusSphere（会清选中，原型 scene.html:776）
         const next = hit.ball === focus ? null : hit.ball;
-        setFocus(next);
-        camRef.current = { q: camRef.current.q, zoom: 1 };
-        flyTo(next);
+        focusSphere(next);
       };
       const onLeave = () => {
         if (hoverRef.current || hoverSphereRef.current) {
@@ -1311,25 +1376,25 @@ window.__ModuleLoader__.load({
         redraw();
       };
       const onDbl = () => {
-        // 双击 = 退回宏观（原型 scene.html:819-823 只回正视角，但那样聚焦后
-        // 没有明确出口，很难退回整体；这里让它两步并一步：直接回全景默认视角，
-        // 但**保留选中的服务**，这样退到宏观还能看见它、依赖线也还在）
+        // 双击 = 退回宏观默认视角。
+        // 只清 focus（相机），**保留选中服务和搜索框** —— 双击是「看全貌」，
+        // 不是「我不想看这个服务了」。要清请用「重置视角」按钮。
         camRef.current = { q: quatFromEuler(1.3963, 0), zoom: 1 };
         setFocus(null);
         flyTo(null);
         redraw();
       };
 
-      // 搜索：回车跳到第一个匹配的服务所在球
+      // 搜索：回车 → 定位到第一个匹配的服务。
+      // 用 focusBallOnly（不清 selected），因为下一步马上要设 selected。
       const onSearchKey = (e) => {
         if (e.key !== 'Enter') return;
         const q = query.trim().toLowerCase();
         if (!q) return;
         for (const [name, rec] of Object.entries(IFACE)) {
           if (name.toLowerCase().includes(q) || (rec.zh ?? '').toLowerCase().includes(q)) {
-            setFocus(rec.ball);
+            focusBallOnly(rec.ball);
             setSelected(name);
-            camRef.current = { q: camRef.current.q, zoom: 1 };
             return;
           }
         }
@@ -1350,20 +1415,24 @@ window.__ModuleLoader__.load({
         return out;
       }, [query, focus]);
 
+      // 搜索框提示语跟着「当前在看什么」变（原型 updateSearchPlaceholder，scene.html:1187-1195）。
+      // 搜索框本身**常驻**：切到插件链也还在，内容和提示都不丢。
+      const searchHint = selSvc ? '在这个模块的接口里搜…'
+        : focusBall ? '在这个球里搜模块 / 接口…'
+          : '搜接口名 / 签名 / 说明…';
+
       return h('div', { className: 'kb-root' },
         h('div', { className: 'kb-top' },
           h('span', { className: 'kb-title' }, 'DSH-КБ-plugin'),
           h('span', { className: 'kb-sub' }, '插件设计局'),
-          view === '3d'
-            ? h('div', { className: 'kb-q' },
-              h('input', {
-                type: 'search',
-                placeholder: '搜接口 / 服务，回车定位',
-                value: query,
-                onChange: (e) => setQuery(e.target.value),
-                onKeyDown: onSearchKey,
-              }))
-            : null,
+          h('div', { className: 'kb-q' },
+            h('input', {
+              type: 'search',
+              placeholder: searchHint,
+              value: query,
+              onChange: (e) => setQuery(e.target.value),
+              onKeyDown: onSearchKey,
+            })),
           h('button', { className: 'kb-close', type: 'button', onClick: close, title: '关闭，回到对话' }, '关闭'),
         ),
         // 主区域永远是三维；功能切换在右侧面板内
@@ -1388,22 +1457,23 @@ window.__ModuleLoader__.load({
                 selSvc ? h('b', null, selSvc.name) : null,
               ),
             ),
-            // 左下角：16 个球的快捷跳转 + 重置视角（原型 #dock）
+            // 左下角：14 个球的快捷跳转 + 重置视角（原型 #dock）
             h(Dock, {
               spheres: SPHERES,
               focus,
+              // 点 Dock = 用户主动换球 → focusSphere（原型 scene.html:906 同语义）
               onPick: (id) => {
                 const next = id === focus ? focus : id;
-                setFocus(next);
-                setSelected(null);
-                camRef.current = { q: camRef.current.q, zoom: 1 };
-                flyTo(next);
+                focusSphere(next);
               },
+              // 重置视角 = 回到「什么都没看」的状态（原型 resetView，scene.html:872-879）
               onReset: () => {
                 camRef.current = { q: quatFromEuler(1.3963, 0), zoom: 1 };
                 setFocus(null);
                 setSelected(null);
+                setQuery('');
                 flyTo(null);
+                redraw();
               },
             }),
           // 右侧：功能切换 + 内容
@@ -1418,6 +1488,27 @@ window.__ModuleLoader__.load({
                 onClick: () => setView('chain'),
               }, '插件链' + (plan.nodes.length ? ` ${plan.nodes.length}` : '')),
             ),
+            // 选中了服务 → 顶部永远挂一块「当前服务」卡片（原型 scene.html:1064-1085）。
+            // 不管下面显示球详情还是概览，它都在。这就是「选中不该被挤掉」。
+            selSvc
+              ? h('div', { className: 'kb-cur' },
+                h('div', { className: 'kb-curhd' },
+                  h('b', null, selSvc.name),
+                  h('span', { className: 'kb-muted' }, ' · ' + (focusBall ? focusBall.nameEn : (SPHERE_NAMES[selSvc.rec.ball]?.en ?? ''))),
+                  h('span', { className: 'sp' }),
+                  h('button', {
+                    className: 'kb-btn',
+                    title: '取消选中，回到上层',
+                    onClick: () => { setSelected(null); },
+                  }, '×'),
+                ),
+                h('div', { className: 'kb-muted', style: { fontSize: '11px' } },
+                  `${selSvc.rec.n} 个接口${selSvc.rec.pkg ? ' · ' + selSvc.rec.pkg : ''}`),
+                selSvc.rec.zh
+                  ? h('div', { style: { marginTop: '5px', lineHeight: 1.6, fontSize: '11.5px' } }, selSvc.rec.zh)
+                  : null,
+              )
+              : null,
             view === 'chain'
               ? h(ChainView, {
                 selected,          // 图里选中的服务（加节点用这个）
@@ -1425,19 +1516,17 @@ window.__ModuleLoader__.load({
                 setChainSel,
                 plan,
                 setPlan,           // 已经是「改 + 落盘」的合成器
+                // 链条里点节点 → 只挪镜头，**不动 selected**（原型 focusBallOnly）。
+                // 否则「在链条里点一下」就把主图的选中顶掉了，两个选中互相打架。
                 onFocusSvc: (svc, ball) => {
-                  // 链条里点节点 → 三维聚焦过去 + 选中该服务
                   const target = ball && BY_ID[ball] ? ball : (IFACE[svc]?.ball ?? null);
-                  if (!target) return;
-                  setFocus(target);
-                  setSelected(svc);
-                  camRef.current = { q: camRef.current.q, zoom: 1 };
-                  flyTo(target);
+                  if (target) focusBallOnly(target);
                 },
               })
-              : (selSvc ? h(ServiceDetail, { name: selSvc.name, rec: selSvc.rec, setFocus, setSelected })
+              : (selSvc
+                ? h(ServiceDetail, { name: selSvc.name, rec: selSvc.rec, focusBallOnly, setSelected })
                 : focusBall ? h(BallDetail, { ball: focusBall, setSelected })
-                  : h(Overview, { matches, setFocus, setSelected })),
+                  : h(Overview, { matches, focusBallOnly, setSelected })),
           ),
         ),
         h('div', { className: 'kb-foot' },
@@ -1480,7 +1569,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 全景：概览 + 搜索命中 */
-    function Overview({ matches, setFocus, setSelected }) {
+    function Overview({ matches, focusBallOnly, setSelected }) {
       const kids = [];
       const byPlane = { host: 0, client: 0 };
       for (const s of SPHERES) byPlane[s.plane] = (byPlane[s.plane] ?? 0) + 1;
@@ -1500,7 +1589,7 @@ window.__ModuleLoader__.load({
         for (const m of matches) {
           kids.push(h('div', {
             key: 's' + m.name, className: 'kb-svc',
-            onClick: () => { setFocus(m.rec.ball); setSelected(m.name); },
+            onClick: () => { focusBallOnly(m.rec.ball); setSelected(m.name); },
           },
           h('div', { className: 'nm' }, m.name),
           h('div', { className: 'sg' }, (m.rec.zh || '').slice(0, 70)),
@@ -1540,16 +1629,17 @@ window.__ModuleLoader__.load({
       return kids;
     }
 
-    /** 一个服务的接口 */
-    function ServiceDetail({ name, rec, setFocus, setSelected }) {
+    /** 一个服务的接口（顶部「当前服务」卡片已经在外面画了，这里只放详情） */
+    function ServiceDetail({ name, rec, focusBallOnly, setSelected }) {
       const ball = SPHERE_NAMES?.[rec.ball];
       const kids = [];
+      // 面包屑回球：只挪镜头，**不清 selected**（原型 scene.html:1082-1084 的「← 返回」）
       kids.push(h('div', { key: 'h', className: 'kb-h' },
-        h('span', { style: { cursor: 'pointer' }, onClick: () => { setFocus(rec.ball); setSelected(null); } },
-          ball ? `${ball.en} ›` : ''), ' ', name));
-      kids.push(h('div', { key: 'meta', className: 'kb-muted', style: { fontSize: '11px' } },
-        `${rec.n} 个接口${rec.pkg ? ' · ' + rec.pkg : ''}`));
-      if (rec.zh) kids.push(h('div', { key: 'zh', style: { marginTop: '6px', lineHeight: 1.65 } }, rec.zh));
+        h('span', {
+          style: { cursor: 'pointer' },
+          onClick: () => { focusBallOnly(rec.ball); setSelected(null); },
+        },
+        ball ? `← 返回 ${ball.en}` : '← 返回')));
 
       // 依赖 / 被依赖：分组 + 计数 + 筛选 + chip 可点（原型 renderDeps）
       kids.push(h(DepsBox, { key: 'deps', svc: name, rec, setSelected }));
@@ -1680,10 +1770,26 @@ window.__ModuleLoader__.load({
         return true;
       };
 
+      /**
+       * 「要加进链条的服务」是谁？
+       *
+       * 两条来源，按这个优先级：
+       *   ① 链条里选中的节点 → 它的服务（你在链条里看着谁，就是要加谁）
+       *   ② 主图里选中的服务 → 它（你在三维里看着谁，就是要加谁）
+       *
+       * ① 优先，因为切到插件链 Tab 之后，你的注意力在链条上；
+       * 主图的 selected 是「上次看过的服务」，可能已经很旧了。
+       */
+      const addSvc = (() => {
+        const nd = sel ? nodeById(sel) : null;
+        if (nd) return nd.svc;
+        return selected || null;
+      })();
+
       /** 加节点并连一条 A 边（原型 addNodeWithEdge，scene.html:1679-1727）*/
       const addNodeWithEdge = (dir0) => {
-        const svc = selected;      // 加的是「图里选中的那个服务」
-        if (!svc) { say('先在三维里点一个服务'); return; }
+        const svc = addSvc;
+        if (!svc) { say('先在三维里点一个服务，或在链条里点一个节点'); return; }
         const cur = sel ? nodeById(sel) : null;   // 插入位置 = 「链条里选中的节点」
         const method = null;
 
@@ -1816,7 +1922,7 @@ window.__ModuleLoader__.load({
           : selNode.svc + ' 还是孤立的，前后都没有连接。';
       }
 
-      const canAdd = !!selected;
+      const canAdd = !!addSvc;
       const canLink = plan.nodes.length >= 2 && !!selNode;
 
       return h('div', { className: 'kb-chain', style: { position: 'relative' } },
@@ -1835,7 +1941,9 @@ window.__ModuleLoader__.load({
               fontSize: '11.5px', color: 'var(--dsw-alias-label-secondary)',
               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
             },
-          }, selected ? '当前：' + selected : '未选服务'),
+          }, addSvc
+            ? '当前：' + addSvc + (selected === addSvc ? '' : '（链条）')
+            : '未选服务'),
         ),
         h('div', { className: 'kb-ctl' },
           h('button', {
@@ -1930,7 +2038,9 @@ window.__ModuleLoader__.load({
                 }
                 setSel(n.id);
                 setSelEdge(null);
-                // 三维跟着跳过去：聚焦该服务所在球、选中它、画出它的依赖线
+                // 三维跟着把镜头挪过去（原型 focusBallOnly）。
+                // **不动主图的 selected** —— 链条的选中是 chainSel，主图的选中是 selected，
+                // 两个各管一摊。主图里没选中时，activeSvc 会退到 chainSvc，线照样画出来。
                 if (onFocusSvc) onFocusSvc(n.svc, n.ball);
               },
               style: { cursor: 'pointer' },
