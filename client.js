@@ -83,7 +83,16 @@ window.__ModuleLoader__.load({
       return false;
     };
 
-    // ── 布局：拓扑分层，层号 = 最长前置路径（原型 scene.html:1250-1274，原样）──
+    // ── 布局：拓扑分层（原型 scene.html:1250-1274，逐行照抄）──
+    //
+    // 层号 = 最长前置路径。**A 边和 O 边一样参与分层** —— 原型就是这么写的，
+    // 它没有「O 边不推层」这回事。
+    //
+    // 原型的图模型注释（scene.html:1213-1214）：
+    //   分叉 = 一个节点有多条出边，汇合 = 一个节点有多条入边
+    //   —— 不需要单独的 parallel 字段，图本身就能表达。
+    //
+    // 所以「一拖二」不需要任何特殊布局：A 加两次，B 和 C 同层，自然并排。
     const NW = 104, NH = 48, GX = 44, GY = 8;
 
     function layoutPlan(nodes, edges) {
@@ -115,50 +124,53 @@ window.__ModuleLoader__.load({
     const topoLayers = (nodes, edges) => layoutPlan(nodes, edges).cols;
 
     /**
-     * 前后添加的自检（原型 scene.html:1631-1677，原样）。
+     * 前后添加时，找「该连回哪个已有节点」——**两步窗口：第 1 步 + 第 2 步**。
      *
-     * 光查「直接相邻」不够，光查「上游」也不够：
+     * 定这一条规则的人是 Frank，原话：
+     *   「从 D 出发向后看，在 D 所在的链条上不管几条向后看，
+     *     如果看到下下步有向前伸的 E 触发，就连上。
+     *     这一步宁愿严格一些，因为剩下的可以交给连线。」
+     *   后来又补：「上一步正好有已有的节点，也没有自动连接。」← 第 1 步必须算
      *
-     *     A ──A──> B ──A──> D
-     *      └─A──> C            ← C 既不是 D 的前驱，也不是 D 的上游
+     * 所以：
+     *   后加 E（选中 D）→ 沿 D 的**向后**路径走 1 步和 2 步；
+     *                    任何一步里若有节点是 E，就把 D → E 连上、复用那个 E。
+     *   前加 E（选中 D）→ 沿 D 的**向前**路径走 1 步和 2 步；
+     *                    任何一步里若有节点是 E，就连 E → D。
      *
-     * C 是 D 的「堂兄弟」——同一个祖先（A）的另一条出边。
-     * 但用户要的就是「选中 D、前置添加 C → 连回那个 C」。
+     * **第 3 步及更远不算** —— 宁可漏连，也不误连；漏了用户点「⇢ 连到…」自己连。
      *
-     * 所以候选集合 = 祖先（或后代）本身 ∪ 它们的其他出边目标（兄弟）。
-     * BFS 逐层扩，天然从近到远，命中就返回最近的那个。
+     * 第 1 步优先（近的优先），同一层取第一个命中的。
+     *
+     * @returns 要复用的节点对象，或 null（null = 新建独立节点）
      */
-    function findUpstreamSame(nodes, edges, nodeId, dir, svc, method) {
+    function findStep2Same(nodes, edges, nodeId, dir, svc, method) {
       const nodeById = (id) => nodes.find((n) => n.id === id) || null;
       const match = (n) => n && n.svc === svc && (!method || !n.method || n.method === method);
       const preds = (id) => edges.filter((e) => e.to === id).map((e) => e.from);
       const succs = (id) => edges.filter((e) => e.from === id).map((e) => e.to);
-      const fwd = dir === 'before' ? preds : succs;   // 找上游还是下游
-      const sib = dir === 'before' ? succs : preds;   // 兄弟：反向的那一步
+
+      // 向后看（after）用后继，向前看（before）用前驱
+      const step = dir === 'before' ? preds : succs;
 
       const seen = new Set([nodeId]);
-      let frontier = [nodeId];
 
-      for (let depth = 0; depth < 12 && frontier.length; depth++) {
-        const next = [];
-        for (const id of frontier) {
-          for (const x of fwd(id)) {
-            if (seen.has(x)) continue;
-            seen.add(x);
-            const nx = nodeById(x);
-            if (match(nx)) return nx;          // 祖先 / 后代命中
-            next.push(x);
+      // 第 1 步
+      const first = step(nodeId).filter((x) => !seen.has(x));
+      for (const x of first) {
+        seen.add(x);
+        const nx = nodeById(x);
+        if (match(nx)) return nx;      // ← 上一步已经是它，直接连回
+      }
 
-            // 兄弟：x 的另一侧邻居（同父的其它分支）
-            for (const y of sib(x)) {
-              if (y === id || seen.has(y)) continue;
-              seen.add(y);
-              const ny = nodeById(y);
-              if (match(ny)) return ny;
-            }
-          }
+      // 第 2 步
+      for (const x of first) {
+        for (const y of step(x)) {
+          if (seen.has(y)) continue;
+          seen.add(y);
+          const ny = nodeById(y);
+          if (match(ny)) return ny;
         }
-        frontier = next;
       }
       return null;
     }
@@ -792,6 +804,18 @@ window.__ModuleLoader__.load({
         const pos = {};
         for (const s of SPHERES) pos[s.id] = project([s.x, s.y, s.z]);
 
+        // 当前该高亮的服务（主图选中 或 链条选中节点的服务），
+        // 以及它所在的球 —— 用来把无关的键线压暗，让主次分开。
+        const activeSvcRef = (() => {
+          if (selected && IFACE[selected]) return selected;
+          if (chainSel) {
+            const nd = (plan.nodes ?? []).find((x) => x.id === chainSel);
+            if (nd && IFACE[nd.svc]) return nd.svc;
+          }
+          return null;
+        })();
+        const ballOfSvc = (svc) => (svc ? (IFACE[svc]?.ball ?? null) : null);
+
         // ── ① 键线：曲线（原型 scene.html:496-521）────────
         // 跨面 = 琥珀色，同面 = 石板灰；弯度跨面大、同面小
         for (const b of BONDS) {
@@ -802,14 +826,31 @@ window.__ModuleLoader__.load({
           if (focus) {
             const touch = b.from === focus || b.to === focus;
             if (!touch) continue;
-            alpha = b.planeCross ? 0.46 : 0.28;
+            alpha = b.planeCross ? 0.78 : 0.52;
             width = Math.min(7, 1 + Math.log2((b.count ?? 1) + 1));
           } else {
-            // 宏观。原型是 0.085 / 0.05 —— 折算到深色底上几乎和灰底一个色，
-            // 于是「所有线都是灰的」。这里把两类各自拉开：
-            //   跨面 = 暖琥珀，同面 = 冷石板，且亮到一眼能分出两种。
-            alpha = b.planeCross ? 0.30 : 0.20;
-            width = Math.min(4.5, 0.7 + Math.log2((b.count ?? 1) + 1) * 0.6);
+            // ── 宏观键线 ──
+            //
+            // 两类键只靠**颜色**分，不加虚线。
+            // （试过给同面键加虚线，结果「有些线变成蓝色虚线」，看着更乱 —— 撤回。）
+            //
+            //   跨面 host↔client  → 暖琥珀
+            //   同面 host↔host / client↔client → 石板灰
+            //
+            // 亮度：原始 0.80，能看清就行，不刺眼。
+            alpha = b.planeCross ? 0.80 : 0.62;
+            width = b.planeCross
+              ? Math.min(4.5, 1.0 + Math.log2((b.count ?? 1) + 1) * 0.6)
+              : Math.min(3.0, 0.5 + Math.log2((b.count ?? 1) + 1) * 0.4);
+
+            // ── 选中服务后：**所有**宏观键线一起压到 20% ──
+            //
+            // 不区分「相关」和「无关」，全部一起压。选中之后画布的主角只有
+            // 那条服务的依赖线，键线全部退成背景。
+            if (activeSvcRef) {
+              alpha *= 0.20;
+              width *= 0.9;
+            }
           }
 
           const mx = (pa.x + pb.x) / 2;
@@ -822,20 +863,20 @@ window.__ModuleLoader__.load({
           g.beginPath();
           g.moveTo(pa.x, pa.y);
           g.quadraticCurveTo(mx + (-dy / len) * len * kk, my + (dx / len) * len * kk, pb.x, pb.y);
-          g.strokeStyle = b.planeCross ? `rgba(186,117,7,${alpha})` : `rgba(148,163,184,${alpha})`;
+          // 两类键只靠颜色分，都是实线：
+          //   跨面 暖琥珀 / 同面 石板灰
+          // 试过给同面加虚线，观感更乱，撤回。
+          g.strokeStyle = b.planeCross
+            ? `rgba(233,162,59,${alpha})`     // 暖琥珀：跨面
+            : `rgba(148,163,184,${alpha})`;   // 石板灰：同面
+          g.setLineDash([]);
           g.lineWidth = width;
           g.stroke();
 
-          // 曲线中点：未来「展开成服务对服务」的把手
-          if (!focus || b.from === focus || b.to === focus) {
-            const t = 0.5;
-            const qx = (1 - t) * (1 - t) * pa.x + 2 * (1 - t) * t * (mx + (-dy / len) * len * kk) + t * t * pb.x;
-            const qy = (1 - t) * (1 - t) * pa.y + 2 * (1 - t) * t * (my + (dx / len) * len * kk) + t * t * pb.y;
-            g.beginPath();
-            g.arc(qx, qy, focus ? 3.2 : 2.2, 0, Math.PI * 2);
-            g.fillStyle = b.planeCross ? 'rgba(186,117,7,0.85)' : 'rgba(148,163,184,0.7)';
-            g.fill();
-          }
+          // 曲线中点原来画一个小圆当「未来展开成服务对服务」的把手。
+          // 59 组键线一起画的时候，满屏小圆点，看着很乱，而且那个功能一直没做。
+          // 去掉：线的形状本身已经够说明问题，不需要额外的点。
+          // 真要做「展开」，应该是点线选中它，而不是点中点。
         }
 
         // ── ② 球 + 球内服务点（原型 scene.html:526-588）────
@@ -867,21 +908,25 @@ window.__ModuleLoader__.load({
           const isHover = hoverSphereRef.current === s.id;
 
           if (dimmed) {
-            // 聚焦时其它球缩成小点，作为可切换的目标（原型 scene.html:546-557）
+            // 聚焦时其它球**不再缩成小点**，改成 5% 透明度的完整球壳（Frank 2026-11-02 定）。
+            //
+            // 原来缩成 r*0.06 的小圆点，等于「看不见那儿还有个球」，
+            // 而且点它切过去全靠运气。现在保持真实大小，只是几乎透明 ——
+            // 你一眼看到那里有个球，也知道球有多大、在哪个方位。
             g.beginPath();
-            g.arc(c.x, c.y, Math.max(2.5, r * 0.06), 0, Math.PI * 2);
-            g.fillStyle = `rgba(${hex},${isHover ? 0.85 : 0.34})`;
+            g.arc(c.x, c.y, r, 0, Math.PI * 2);
+            g.fillStyle = `rgba(${hex},${isHover ? 0.05 : 0.05})`;
             g.fill();
-            if (isHover) {
-              g.strokeStyle = `rgba(${hex},0.45)`;
-              g.lineWidth = 1.2;
-              g.stroke();
-              g.textAlign = 'center';
-              g.textBaseline = 'middle';
-              g.font = `400 ${Math.max(11, Math.min(18, r * 0.14))}px "Times New Roman","SimSun",serif`;
-              g.fillStyle = `rgba(${hex},0.85)`;
-              g.fillText(s.nameEn || s.id, c.x, c.y - Math.max(14, r * 0.16));
-            }
+            g.lineWidth = isHover ? 1.6 : 1;
+            g.strokeStyle = `rgba(${hex},${isHover ? 0.42 : 0.13})`;
+            g.stroke();
+
+            // 球名：常态极淡，悬停才亮出来（仍然「看得见那儿有个球」）
+            g.textAlign = 'center';
+            g.textBaseline = 'middle';
+            g.font = `400 ${Math.max(11, Math.min(18, r * 0.14))}px "Times New Roman","SimSun",serif`;
+            g.fillStyle = `rgba(${hex},${isHover ? 0.85 : 0.14})`;
+            g.fillText(s.nameEn || s.id, c.x, c.y - Math.max(14, r * 0.16));
             continue;
           }
 
@@ -1259,9 +1304,17 @@ window.__ModuleLoader__.load({
           return { x: size.w / 2 + r[0] * scale * f, y: size.h / 2 - r[1] * scale * f, z: r[2], f };
         };
 
-        // 照抄原型 pickSphere（scene.html:745-760）：
-        // 聚焦时焦点球被放大几乎盖满屏，只取「最近」会永远停在它上面切不出去，
-        // 所以优先返回其它球 —— 点暗着的球 = 切过去。
+        // 拾取优先级（Frank 要求 2026-11-02）：
+        //   **聚焦时，焦点球里的服务点最优先**，其次是别的球。
+        //
+        // 原因：聚焦之后球被放大到几乎盖满屏，如果还按「别的球优先」，
+        // 你点了半天全是换球，「白白聚焦了」。聚焦的意义就是点里面的东西。
+        //
+        // 反过来，聚焦球**外面**点一下才不会误切 —— 因为焦点球本身可能就是最近的球，
+        // 只按「最近」取会永远停在它上面。所以：
+        //   ① 先在焦点球里找服务点（点 / 缩写文字都算）
+        //   ② 找不到，再看别的球（按距离最近）
+        //   ③ 都没有，再看焦点球本身（= 点击空白区域，用来触发回全景）
         const cands = [];
         for (const s of SPHERES) {
           const p = proj([s.x, s.y, s.z]);
@@ -1270,37 +1323,45 @@ window.__ModuleLoader__.load({
           if (d <= Math.max(r, 6)) cands.push({ s, d, p, r });
         }
         if (!cands.length) return null;
-        const other = cands
-          .filter((c) => c.s.id !== focus)
-          .sort((a, b) => a.d - b.d);
-        const hit = other.length ? other[0] : cands.sort((a, b) => a.d - b.d)[0];
 
-        if (focus !== hit.s.id) return { ball: hit.s.id, svc: null };
+        const inside = (hit) => hit.s.id === focus;
 
-        // 聚焦球内再找服务：点（半径 26）和它右边的缩写文字都算命中。
-        // 字比点宽得多，只认点的话「看着能点、点了没反应」。
-        let svc = null;
-        let bd = Infinity;
-        for (const n of hit.s.nodes ?? []) {
-          const p = proj(n.pos);
-          // 点本身
-          const dDot = Math.hypot(mx - p.x, my - p.y);
-          if (dDot < 26 && dDot < bd) { bd = dDot; svc = n.name; continue; }
-          // 缩写文字的矩形（从点右侧 offsetX 起，到文字宽度）
-          const size = Math.max(12, Math.min(17, 14 * (p.f ?? 1)));
-          const offsetX = size * 0.55;
-          const label = abbrev(n.name);
-          // 估宽：等宽近似，够用
-          const wLabel = label.length * size * 0.62;
-          const inBox = mx >= p.x + offsetX - 3
-            && mx <= p.x + offsetX + wLabel + 5
-            && Math.abs(my - p.y) <= size * 0.85;
-          if (inBox) {
-            const dc = Math.hypot(mx - (p.x + offsetX), my - p.y);
-            if (dc < bd) { bd = dc; svc = n.name; }
+        // ① 焦点球内找服务点：点（半径 26）和它右边的缩写文字都算命中。
+        //    字比点宽得多，只认点的话「看着能点、点了没反应」。
+        const probeNode = (sph) => {
+          let svc = null;
+          let bd = Infinity;
+          for (const n of sph.nodes ?? []) {
+            const p = proj(n.pos);
+            const dDot = Math.hypot(mx - p.x, my - p.y);
+            if (dDot < 26 && dDot < bd) { bd = dDot; svc = n.name; continue; }
+            const size = Math.max(12, Math.min(17, 14 * (p.f ?? 1)));
+            const offsetX = size * 0.55;
+            const label = abbrev(n.name);
+            const wLabel = label.length * size * 0.62;
+            const inBox = mx >= p.x + offsetX - 3
+              && mx <= p.x + offsetX + wLabel + 5
+              && Math.abs(my - p.y) <= size * 0.85;
+            if (inBox) {
+              const dc = Math.hypot(mx - (p.x + offsetX), my - p.y);
+              if (dc < bd) { bd = dc; svc = n.name; }
+            }
           }
+          return svc;
+        };
+
+        const focusCand = cands.find(inside);
+        if (focusCand) {
+          const svcInFocus = probeNode(focusCand.s);
+          if (svcInFocus) return { ball: focusCand.s.id, svc: svcInFocus };
         }
-        return { ball: hit.s.id, svc };
+
+        // ② 别的球（按距离最近）
+        const other = cands.filter((c) => !inside(c)).sort((a, b) => a.d - b.d);
+        if (other.length) return { ball: other[0].s.id, svc: null };
+
+        // ③ 只剩焦点球本身 → 点在球壳空白处，交给上层当作回全景
+        return { ball: focusCand.s.id, svc: null };
       };
 
       const onDown = (e) => {
@@ -1353,8 +1414,15 @@ window.__ModuleLoader__.load({
         const rect = e.currentTarget.getBoundingClientRect();
         const hit = hitTest(e.clientX - rect.left, e.clientY - rect.top);
         if (!hit) {
-          // 点空白 = 用户主动「什么都不看」→ 回全景并清选中（原型 scene.html:777）
-          focusSphere(null);
+          // 点空白 = 只是没点到东西。**不取消选中**。
+          //
+          // 在宏观里随手点一下背景太自然了，不能拿它当「我不想看了」。
+          // 曾经这里走 focusSphere(null)，而 focusSphere 会 setSelected(null)，
+          // 于是「点一下空白，刚选的服务就没了」。
+          // 真要取消：点右侧「×」、或点「重置视角」。这里只把镜头拉回全景。
+          setFocus(null);
+          camRef.current = { q: camRef.current.q, zoom: 1 };
+          flyTo(null);
           return;
         }
         if (hit.svc) { setSelected(hit.svc); return; }
@@ -1771,43 +1839,58 @@ window.__ModuleLoader__.load({
       };
 
       /**
-       * 「要加进链条的服务」是谁？
+       * 「锚点」是谁？—— **链条里选中的那个节点**。
        *
-       * 两条来源，按这个优先级：
-       *   ① 链条里选中的节点 → 它的服务（你在链条里看着谁，就是要加谁）
-       *   ② 主图里选中的服务 → 它（你在三维里看着谁，就是要加谁）
+       * Frank 的原话：
+       *   「添加只会基于右上角插件链框中选定的节点添加。
+       *     假设这个选中的是 A，那么后加就是生成 A 后方的节点，
+       *     前加就是 A 前方的节点。」
+       *   「因为你要编辑插件链，插入节点，就必须基于当前所选的节点。
+       *     如果你选择三维图就直接插入，那么称不上编辑插件链，
+       *     充其量是让插件链记录你点的顺序。」
        *
-       * ① 优先，因为切到插件链 Tab 之后，你的注意力在链条上；
-       * 主图的 selected 是「上次看过的服务」，可能已经很旧了。
+       * 三维图那一边只是**跟随对焦**：链条里选中哪个节点，三维就把镜头挪过去。
+       * 它不参与插入决定。
+       *
+       * 「要加的是哪个服务」：
+       *   ① 三维里选中的服务（STATE.selected）—— 你在球里点谁，就是要加谁
+       *   ② 都没有时，退回链条里选中节点自己的服务（便于连续往后排一串）
        */
-      const addSvc = (() => {
-        const nd = sel ? nodeById(sel) : null;
-        if (nd) return nd.svc;
-        return selected || null;
-      })();
+      const anchor = sel ? nodeById(sel) : null;
+      const addSvc = selected || (anchor ? anchor.svc : null);
 
-      /** 加节点并连一条 A 边（原型 addNodeWithEdge，scene.html:1679-1727）*/
+      /**
+       * 加节点并连边（原型 addNodeWithEdge，scene.html:1679-1727）。
+       *
+       * 两个方向：'after' / 'before'。**没有「并行」键** ——
+       * 分叉就是「一个节点有多条出边」，图本身就能表达（原型 scene.html:1213-1214）。
+       *
+       * 连边逻辑恒为 'a'。要 O 就事后点那条边，在操作栏里「⇄ 换成 O 可选」。
+       *
+       * 复用规则换了：不再是原型那个 12 层 BFS，而是 Frank 定的**严格两步窗口**
+       * （见 findStep2Same 的注释）。
+       */
       const addNodeWithEdge = (dir0) => {
         const svc = addSvc;
         if (!svc) { say('先在三维里点一个服务，或在链条里点一个节点'); return; }
-        const cur = sel ? nodeById(sel) : null;   // 插入位置 = 「链条里选中的节点」
+        const cur = anchor;   // 插入位置 = 「链条里选中的节点」
         const method = null;
 
-        // 空链条 / 没选中节点时，前后都等价于「加第一个」—— 不玩方向
+        // 空链条 / 没选中节点时，只有「后续」有意义
         const dir = cur ? dir0 : 'after';
 
-        // ① 自检：相邻位置已经有同一个模块 → 复用，只连边
+        // ① 两步窗口内已经有同一个模块 → 复用，只连边
+        //    （换成 findStep2Same，严格两步，见它的注释）
         if (cur) {
-          const hit = findUpstreamSame(plan.nodes, plan.edges, cur.id, dir, svc, method);
+          const hit = findStep2Same(plan.nodes, plan.edges, cur.id, dir, svc, method);
           if (hit) {
-            let from, to;
-            if (dir === 'after') { from = cur.id; to = hit.id; }
-            else { from = hit.id; to = cur.id; }
+            const from = dir === 'after' ? cur.id : hit.id;
+            const to = dir === 'after' ? hit.id : cur.id;
             if (plan.edges.some((e) => e.from === from && e.to === to)) {
               say('这条边已经有了，直接选中它');
             } else {
               if (!addEdge(from, to, 'a')) return;
-              say('链条里已经有 ' + svc + '，直接连回它（没建重复节点）');
+              say('下两步里有 ' + svc + '，直接连上它（多拖一）');
             }
             setSel(null);
             const idx = plan.edges.findIndex((x) => x.from === from && x.to === to);
@@ -1816,7 +1899,7 @@ window.__ModuleLoader__.load({
           }
         }
 
-        // ② 没有相邻的同名节点 → 正常新建
+        // ② 没有相邻的同名节点 → 正常新建（原型 scene.html:1710-1726）
         const seq = plan.seq + 1;
         const node = {
           id: 'n' + seq,
@@ -1833,8 +1916,8 @@ window.__ModuleLoader__.load({
             seen.add(a);
             return edges.filter((e) => e.from === a).some((e) => reach(e.to, b, seen));
           };
-          const from = dir === 'after' ? cur.id : node.id;
-          const to = dir === 'after' ? node.id : cur.id;
+          const from = dir === 'before' ? node.id : cur.id;
+          const to = dir === 'before' ? cur.id : node.id;
           if (!reach(to, from) && !edges.some((x) => x.from === from && x.to === to)) {
             edges = [...edges, { from, to, logic: 'a' }];
           }
@@ -1874,16 +1957,22 @@ window.__ModuleLoader__.load({
         setSelEdge(null);
       };
 
+      // ── 布局（原型 scene.html:1386-1393，逐行照抄）──
+      //
+      // 纯列式：列 = 拓扑层级，行 = 同层内第几个。同层并排 = 可并发。
+      // 没有任何「竖直分支」的说法 —— 并行就是同层的另一个节点。
       const { cols } = layoutPlan(plan.nodes, plan.edges);
       const pos = new Map();
       cols.forEach((col, ci) => col.forEach((n, ri) => {
         pos.set(n.id, { x: ci * (CHAIN_NW + CHAIN_GX), y: ri * (CHAIN_NH + CHAIN_GY) });
       }));
-      const maxRows = Math.max(1, ...cols.map((c) => c.length));
+      const maxRows = Math.max(...cols.map((c) => c.length));
       const W = cols.length * (CHAIN_NW + CHAIN_GX) - CHAIN_GX;
       const H = maxRows * (CHAIN_NH + CHAIN_GY) - CHAIN_GY;
 
-      // 边的路径：源右边中点 → 目标左边中点，中间一段平滑
+      // 边的路径（原型 scene.html:1396-1403，一条通用公式，不分 A/O）：
+      //   源右边中点 → 目标左边中点，中间一段平滑贝塞尔。
+      // A/O 靠**描边样式**区分（实线灰 / 黄色虚线），不靠走向区分。
       const edgePath = (a, b) => {
         const A = pos.get(a), B = pos.get(b);
         if (!A || !B) return '';
@@ -1909,14 +1998,17 @@ window.__ModuleLoader__.load({
       } else if (linkFrom) {
         hint = '连到已有：点任意一个节点作为目标';
       } else if (!selNode) {
-        hint = '共 ' + plan.nodes.length + ' 个节点、' + plan.edges.length + ' 条边。点节点看它和谁相连。边上的 A 是「必须等它」，O 是「有就带上、不等」。';
+        hint = '共 ' + plan.nodes.length + ' 个节点、' + plan.edges.length + ' 条边。'
+          + '点节点看它和谁相连。边上的 A 是「必须等它」，O 是「有就带上、不等」，点那条边可以切换。';
       } else {
         const ins = plan.edges.filter((x) => x.to === selNode.id);
         const outs = plan.edges.filter((x) => x.from === selNode.id);
         const nm = (id) => (nodeById(id)?.svc ?? id);
         const parts = [];
-        if (ins.length) parts.push('被 ' + ins.map((x) => nm(x.from) + '(' + (x.logic === 'a' ? 'A' : 'O') + ')').join('、') + ' 触发');
-        if (outs.length) parts.push('触发 ' + outs.map((x) => nm(x.to) + '(' + (x.logic === 'a' ? 'A' : 'O') + ')').join('、'));
+        // 原型 scene.html:1537-1540：括号里直接写 A / O
+        const mark = (x) => (x.logic === 'o' ? 'O' : 'A');
+        if (ins.length) parts.push('被 ' + ins.map((x) => nm(x.from) + '(' + mark(x) + ')').join('、') + ' 触发');
+        if (outs.length) parts.push('触发 ' + outs.map((x) => nm(x.to) + '(' + mark(x) + ')').join('、'));
         hint = parts.length
           ? selNode.svc + '：' + parts.join('；')
           : selNode.svc + ' 还是孤立的，前后都没有连接。';
@@ -1982,14 +2074,15 @@ window.__ModuleLoader__.load({
               markerWidth: 5, markerHeight: 5, orient: 'auto-start-reverse',
             }, h('path', { d: 'M2 1L8 5L2 9', fill: 'none', stroke: '#c9a227', strokeWidth: 1.6, strokeLinecap: 'round' })),
           ),
-          // 边
+          // 边（原型 scene.html:1405-1417）
           ...plan.edges.map((ed, i) => {
             const d = edgePath(ed.from, ed.to);
             if (!d) return null;
             const A = pos.get(ed.from), B = pos.get(ed.to);
+            const isOr = ed.logic === 'o';
+            // A/O 标记：中点在源矩形的右边和目标的左边之间（原型 scene.html:1409）
             const mx = (A.x + CHAIN_NW + B.x) / 2;
             const my = (A.y + B.y + CHAIN_NH) / 2;
-            const isOr = ed.logic === 'o';
             const isSel = selEdge === i;
             return h('g', {
               key: 'e' + i,
@@ -2006,6 +2099,7 @@ window.__ModuleLoader__.load({
               fill: 'none',
               stroke: isSel ? 'var(--dsw-alias-brand-primary)' : (isOr ? '#c9a227' : '#5b6470'),
               strokeWidth: isSel ? 2.2 : 1.4,
+              strokeDasharray: isOr ? '5 3' : undefined,
               markerEnd: 'url(#kb-ar-' + (isOr ? 'o' : 'a') + ')',
             }),
             h('circle', {
@@ -2031,9 +2125,13 @@ window.__ModuleLoader__.load({
               onClick: () => {
                 if (linkFrom) {
                   if (n.id === linkFrom) { setLinkFrom(null); return; }
+                  // ★ 连线模式：**只加一条边**，其它什么都不动。
+                  //
+                  // 曾经这里多写了一句 setSel(n.id)，配合 onFocusSvc 会把三维里的
+                  // selected 也换掉 —— 结果是「连个线，整个网络被重排成直线」。
+                  // 连线是**增量**操作：加完边，原来的选中和聚焦全部保持原样。
                   addEdge(linkFrom, n.id, 'a');
                   setLinkFrom(null);
-                  setSel(n.id);
                   return;
                 }
                 setSel(n.id);
@@ -2047,9 +2145,10 @@ window.__ModuleLoader__.load({
             },
             h('rect', {
               x: p.x, y: p.y, width: CHAIN_NW, height: CHAIN_NH, rx: 6,
-              fill: 'var(--dsw-alias-bg-layer-1)',
-              stroke: isFrom ? '#c9a227' : isSel ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-border-l1)',
+              fill: isSel ? 'rgba(201,162,39,0.12)' : 'var(--dsw-alias-bg-layer-1)',
+              stroke: isFrom ? '#e0b060' : isSel ? '#c9a227' : 'var(--dsw-alias-border-l1)',
               strokeWidth: isFrom || isSel ? 1.8 : 1,
+              strokeDasharray: isFrom ? '3 2' : undefined,
             }),
             h('text', { x: p.x + 8, y: p.y + 14, fontSize: 9, fill: 'var(--dsw-alias-label-secondary)' },
               String(i + 1).padStart(2, '0') + ' · ' + ballShort(n.ball)),
@@ -2093,10 +2192,14 @@ window.__ModuleLoader__.load({
             h('div', { className: 'kb-ctl' },
               h('button', { className: 'kb-btn', disabled: !selNode, onClick: removeNode }, '⌫ 删除节点'),
             ),
-            h('div', { style: { fontSize: '10.5px', color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.6 } },
+            h('div', { style: { fontSize: '10.5px', color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.7 } },
               linkFrom
                 ? '连到已有：点上方目标节点'
-                : '「后续 / 前置」会新建节点并连一条 A 边。相邻已有同一模块时不会重复建，直接连上。点一条边可以选中它，再在这里切换 A/O。'),
+                : h('div', null,
+                  h('div', null, '「后续 / 前置」会新建节点并连一条 ', h('b', null, 'A'), ' 边。相邻已有同一模块时不会重复建，直接连上。'),
+                  h('div', null, '同一个节点连点两次「后续」，就得到一个拖两个 —— ', h('b', null, '并行'), '，两个新节点同层并排。'),
+                  h('div', { style: { opacity: 0.8 } }, '要改成 O，点那条边选中它，再在这里切换。'),
+                )),
           ),
 
         // ── toast ──

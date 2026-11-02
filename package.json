@@ -1,6 +1,6 @@
 {
   "name": "dsh-kb-plugin",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "DSH-КБ-plugin · 插件设计局 — 把 DSH 的 cordis 服务图画成三维分子，并在图边上设计插件链。3D Cordis service graph and plugin-chain designer for DeepSeek Harness.",
