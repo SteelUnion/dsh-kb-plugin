@@ -598,7 +598,7 @@ window.__ModuleLoader__.load({
 
       const plan = store.activeId ? store.plans[store.activeId] : emptyPlan();
 
-      /** 改 plan 并写回 localStorage */
+        /** 改 plan 并写回 localStorage */
       const persist = (nextPlan) => {
         const s1 = {
           ...store,
@@ -607,6 +607,11 @@ window.__ModuleLoader__.load({
         setStore(s1);
         saveStore(s1);
       };
+
+      // ChainView 拿到的 setPlan 是「改 + 落盘」的合成器。
+      // 之前漏了这一行，面板一渲染插件链就 ReferenceError，整块白。
+      const setPlan = persist;
+
 
       // 首次挂载时若还没落盘，落一次
       React.useEffect(() => {
@@ -666,12 +671,19 @@ window.__ModuleLoader__.load({
       };
 
       // 补间循环
+      //
+      // 依赖里**不能**放 tick：每次 setOrbit 都会触发重绘 → tick+1 → 这个 effect
+      // 重新执行 → 又起一条 raf 循环。上一轮的循环里 tw.on 还是 true，
+      // 于是两条、四条、八条……帧数指数增长，机器直接卡死。
+      // 只依赖 focus：切球时才起一次。
       React.useEffect(() => {
         const tw = twRef.current;
         if (!tw.on) return undefined;
         let raf = 0;
+        let stopped = false;
         const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
         const step = () => {
+          if (stopped) return;
           const t = Math.min(1, (now() - tw.t0) / tw.dur);
           const e = easeInOut(t);
           const f = tw.from, g2 = tw.to;
@@ -688,8 +700,8 @@ window.__ModuleLoader__.load({
           raf = requestAnimationFrame(step);
         };
         raf = requestAnimationFrame(step);
-        return () => cancelAnimationFrame(raf);
-      }, [tick, focus]);
+        return () => { stopped = true; cancelAnimationFrame(raf); };
+      }, [focus]);
 
       // ── 画一帧 ──────────────────────────────────────────
       React.useEffect(() => {
@@ -762,10 +774,13 @@ window.__ModuleLoader__.load({
           if (focus) {
             const touch = b.from === focus || b.to === focus;
             if (!touch) continue;
-            alpha = b.cross ? 0.46 : 0.28;
+            alpha = b.planeCross ? 0.46 : 0.28;
             width = Math.min(7, 1 + Math.log2((b.count ?? 1) + 1));
           } else {
-            alpha = b.cross ? 0.16 : 0.10;
+            // 宏观。原型是 0.085 / 0.05 —— 折算到深色底上几乎和灰底一个色，
+            // 于是「所有线都是灰的」。这里把两类各自拉开：
+            //   跨面 = 暖琥珀，同面 = 冷石板，且亮到一眼能分出两种。
+            alpha = b.planeCross ? 0.30 : 0.20;
             width = Math.min(4.5, 0.7 + Math.log2((b.count ?? 1) + 1) * 0.6);
           }
 
@@ -774,12 +789,12 @@ window.__ModuleLoader__.load({
           const dx = pb.x - pa.x;
           const dy = pb.y - pa.y;
           const len = Math.hypot(dx, dy) || 1;
-          const kk = b.cross ? 0.30 : 0.16;   // 跨面弯得大
+          const kk = b.planeCross ? 0.30 : 0.16;   // 跨面弯得大
 
           g.beginPath();
           g.moveTo(pa.x, pa.y);
           g.quadraticCurveTo(mx + (-dy / len) * len * kk, my + (dx / len) * len * kk, pb.x, pb.y);
-          g.strokeStyle = b.cross ? `rgba(186,117,7,${alpha})` : `rgba(148,163,184,${alpha})`;
+          g.strokeStyle = b.planeCross ? `rgba(186,117,7,${alpha})` : `rgba(148,163,184,${alpha})`;
           g.lineWidth = width;
           g.stroke();
 
@@ -790,7 +805,7 @@ window.__ModuleLoader__.load({
             const qy = (1 - t) * (1 - t) * pa.y + 2 * (1 - t) * t * (my + (dx / len) * len * kk) + t * t * pb.y;
             g.beginPath();
             g.arc(qx, qy, focus ? 3.2 : 2.2, 0, Math.PI * 2);
-            g.fillStyle = b.cross ? 'rgba(186,117,7,0.85)' : 'rgba(148,163,184,0.7)';
+            g.fillStyle = b.planeCross ? 'rgba(186,117,7,0.85)' : 'rgba(148,163,184,0.7)';
             g.fill();
           }
         }
@@ -799,6 +814,7 @@ window.__ModuleLoader__.load({
         // 降序：z 大的先画（远的先画，近的盖上去）
         const balls = [];
         const innerList = [];    // 聚焦球内的服务点，标签留到最后统一避让
+        let selLabel = null;     // 宏观里选中服务的标签框（给球名避让用）
         const order = [...SPHERES]
           .map((s) => ({ s, p: pos[s.id] }))
           .filter((x) => x.p)
@@ -847,8 +863,12 @@ window.__ModuleLoader__.load({
           g.lineWidth = 1;
           g.stroke();
 
-          // 球内服务点：全景不画，聚焦才画（这是「分级」的关键）
-          // 例外：全景时仍要标出「选中的那个服务」——否则切到宏观就丢了它在哪
+          // 球内服务点 —— 「节点纹理」。
+          //
+          // 宏观里球本身就该带着纹理（你当面提的那条）：默认极淡，像星云里的粉尘，
+          // 不抢层号水印；聚焦时全亮，正常交互。
+          // 选中某个服务后，宏观里它的「所在球 + 那个点 + 名字」一起高亮，
+          // 这样退到宏观不会「什么都没了」。
           if (isFocus) {
             const inner = (s.nodes ?? [])
               .map((n) => ({ n, np: project(n.pos) }))
@@ -872,11 +892,30 @@ window.__ModuleLoader__.load({
 
               innerList.push({ n, np, near, hitSvc, hovSvc, inSearch });
             }
-          } else if (selected) {
-            // 全景：只标出选中的那个服务点 + 名字，让宏观也能看见它
-            const hitNode = (s.nodes ?? []).find((n) => n.name === selected);
-            if (hitNode) {
-              const np = project(hitNode.pos);
+          } else {
+            // ── 宏观：先铺一层极淡的节点纹理（球自带，不选中也看得见）──
+            const nodes = s.nodes ?? [];
+            const selNode = selected ? nodes.find((n) => n.name === selected) : null;
+            for (const n of nodes) {
+              if (selNode && n === selNode) continue;   // 选中的留到后面画重的
+              const np = project(n.pos);
+              g.beginPath();
+              g.arc(np.x, np.y, Math.max(1.1, 1.9 * c.f), 0, Math.PI * 2);
+              g.fillStyle = `rgba(${hex},0.20)`;
+              g.fill();
+            }
+
+            // ── 宏观：选中服务所在的球要认得出来 ──
+            if (selNode) {
+              // ① 球外一圈光晕，标出「它在这个球里」
+              g.beginPath();
+              g.arc(c.x, c.y, r + 5, 0, Math.PI * 2);
+              g.strokeStyle = 'rgba(255,212,121,0.42)';
+              g.lineWidth = 1.6;
+              g.stroke();
+
+              // ② 服务点本身
+              const np = project(selNode.pos);
               g.beginPath();
               g.arc(np.x, np.y, 4.5, 0, Math.PI * 2);
               g.fillStyle = '#ffd479';
@@ -884,17 +923,28 @@ window.__ModuleLoader__.load({
               g.lineWidth = 1.5;
               g.strokeStyle = 'rgba(255,212,121,0.6)';
               g.stroke();
-              // 名字：服务名 + 中英文球名，一起标出来
+
+              // ③ 名字：服务名 · 球名（中英），让宏观自己说清「这是谁、在哪」
               const lab = selected;
+              const sub = (s.nameEn || s.id) + (s.nameZh ? ' · ' + s.nameZh : '');
               g.font = `500 12px -apple-system,"Segoe UI",sans-serif`;
               g.textAlign = 'left';
               g.textBaseline = 'middle';
               g.lineWidth = 3.2;
               g.strokeStyle = 'rgba(9,11,14,0.23)';
               g.lineJoin = 'round';
+              const tw = g.measureText(lab).width;
               g.strokeText(lab, np.x + 8, np.y);
               g.fillStyle = 'rgba(255,212,121,0.98)';
               g.fillText(lab, np.x + 8, np.y);
+
+              g.font = `400 10.5px "Noto Sans SC","PingFang SC",sans-serif`;
+              const ty = np.y + 14;
+              g.strokeText(sub, np.x + 8, ty);
+              g.fillStyle = `rgba(${hex},0.92)`;
+              g.fillText(sub, np.x + 8, ty);
+
+              selLabel = { x: np.x + 8, y: np.y, w: Math.max(tw, g.measureText(sub).width), h: 30 };
             }
           }
 
@@ -922,8 +972,24 @@ window.__ModuleLoader__.load({
 
           const drawOne = (fromSvc, toSvc, color, width) => {
             const A = nodeAt[fromSvc];
-            const B = nodeAt[toSvc];
-            if (!A || !B) return;
+            const B0 = nodeAt[toSvc];
+            if (!A || !B0) return;
+            // 目标点跑到画布外时，把线截到边缘（原型 clampToCanvas，scene.html:1794-1806）。
+            // 不截的话宏观里一条线横穿全屏，看着像乱画。
+            const MARGIN = 10;
+            const inside = (p) => p.x > MARGIN && p.x < w - MARGIN && p.y > MARGIN && p.y < hgt - MARGIN;
+            let B = B0, clipped = false;
+            if (!inside(B0)) {
+              const dx0 = B0.x - A.x, dy0 = B0.y - A.y;
+              let t0 = 1;
+              if (dx0 > 0) t0 = Math.min(t0, (w - MARGIN - A.x) / dx0);
+              if (dx0 < 0) t0 = Math.min(t0, (MARGIN - A.x) / dx0);
+              if (dy0 > 0) t0 = Math.min(t0, (hgt - MARGIN - A.y) / dy0);
+              if (dy0 < 0) t0 = Math.min(t0, (MARGIN - A.y) / dy0);
+              t0 = Math.max(0, Math.min(1, t0));
+              B = { x: A.x + dx0 * t0, y: A.y + dy0 * t0 };
+              clipped = true;
+            }
             const mx = (A.x + B.x) / 2;
             const my = (A.y + B.y) / 2;
             const dx = B.x - A.x;
@@ -941,7 +1007,7 @@ window.__ModuleLoader__.load({
 
             // 箭头：终点一个小三角，表示方向
             const ang = Math.atan2(B.y - cy, B.x - cx);
-            const rr = 4.5;
+            const rr = clipped ? 3.2 : 4.5;
             g.beginPath();
             g.moveTo(B.x, B.y);
             g.lineTo(B.x - rr * Math.cos(ang - 0.4), B.y - rr * Math.sin(ang - 0.4));
@@ -951,6 +1017,10 @@ window.__ModuleLoader__.load({
             g.fill();
           };
 
+          // 颜色与原型对齐（scene.html:1844/1850）：出边青色、入边橙色。
+          // 直接依赖 vs 推断边的对比度要拉开 —— 推断边占了一半多，
+          // 太淡就等于「一条线都看不见」。注意这里用的是不透明色值 + 全局透明度，
+          // 半透明白色叠加会让线偏灰，所以直接给足 alpha。
           const LIMIT = 12;   // 原型是 4；这里给多点，画布够大
           const rank = (x) => (x.c === 'direct' ? 0 : 1);
           const rec0 = IFACE[selected];
@@ -961,7 +1031,7 @@ window.__ModuleLoader__.load({
             .slice(0, LIMIT);
           for (const d of outs) {
             drawOne(selected, d.to,
-              d.c === 'direct' ? 'rgba(96,196,214,0.70)' : 'rgba(96,196,214,0.35)', 1.8);
+              d.c === 'direct' ? 'rgba(96,196,214,0.92)' : 'rgba(96,196,214,0.42)', 1.6);
           }
 
           const ins = (rec0.by ?? [])
@@ -970,7 +1040,7 @@ window.__ModuleLoader__.load({
             .slice(0, LIMIT);
           for (const d of ins) {
             drawOne(d.from, selected,
-              d.c === 'direct' ? 'rgba(230,150,80,0.65)' : 'rgba(230,150,80,0.32)', 1.8);
+              d.c === 'direct' ? 'rgba(230,150,80,0.88)' : 'rgba(230,150,80,0.40)', 1.6);
           }
 
           // 端点小圆
@@ -1032,8 +1102,9 @@ window.__ModuleLoader__.load({
 
         // ── ③ 球名：贪心避让 + 引线（原型 scene.html:593-666）──
         // 大球优先；每个球试多个纵向位置，选第一个不撞的。
+        // 宏观里选中服务的那个标签也算已占位，球名不许糊上去。
         {
-          const placed = [];
+          const placed = selLabel ? [selLabel] : [];
           const ov = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
           const list = balls.slice().sort((a, b) =>
@@ -1240,15 +1311,12 @@ window.__ModuleLoader__.load({
         redraw();
       };
       const onDbl = () => {
-        // 双击 = 回默认视角（原型 scene.html:819-823：聚焦时回正该球，全景时回默认）
+        // 双击 = 退回宏观（原型 scene.html:819-823 只回正视角，但那样聚焦后
+        // 没有明确出口，很难退回整体；这里让它两步并一步：直接回全景默认视角，
+        // 但**保留选中的服务**，这样退到宏观还能看见它、依赖线也还在）
         camRef.current = { q: quatFromEuler(1.3963, 0), zoom: 1 };
-        if (focus) {
-          flyTo(focus);           // 还在这个球上，只回正视角
-        } else {
-          setFocus(null);
-          setSelected(null);
-          flyTo(null);
-        }
+        setFocus(null);
+        flyTo(null);
         redraw();
       };
 
@@ -1356,7 +1424,7 @@ window.__ModuleLoader__.load({
                 chainSel,          // 链条里选中的节点（插入位置用这个）
                 setChainSel,
                 plan,
-                setPlan: (p) => { setPlan(p); persist(p); },
+                setPlan,           // 已经是「改 + 落盘」的合成器
                 onFocusSvc: (svc, ball) => {
                   // 链条里点节点 → 三维聚焦过去 + 选中该服务
                   const target = ball && BY_ID[ball] ? ball : (IFACE[svc]?.ball ?? null);
